@@ -193,6 +193,8 @@ code (`CA` stays California). Everything above applies to it unchanged, with the
   `derived/geo/regions/<code>/` (`national`, `water`, `terrain`, `places`, `buildings`, `crops`, each `.sqlite`, with the
   same tables as the US files), and `build_packs.py map <code>` (`region_set`) copies the rows inside its box onto the
   base map, with new ids above the base map's. For Canada: `tools/build_region_canada.py <code> all`.
+  If the Statistics Canada building download is unavailable, run `python tools/build_region_canada.py CA-BC all --ms-only`
+  to use Microsoft Canadian Building Footprints. Use `CA-BC buildings --ms-only` to rebuild just that layer.
 - **Manifest.** The entry's `id` is the region code, `kind` is the region's kind (`province`), and `includes` comes from
   its file. The zip is `Lastbook-Map-<code>.zip`; `map-set.json`'s `name` and `state.current.map` are the code.
 - **Setup.** When a listed map is not a state, the picker's words say "state or region" instead of "state", and All

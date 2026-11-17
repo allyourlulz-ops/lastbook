@@ -153,8 +153,15 @@
     "licence": "ODbL-1.0",
     "licence_url": "https://www.openstreetmap.org/copyright",
     "attribution": "© OpenStreetMap contributors, under the Open Database License (ODbL).",
-    "access": "https://download.geofabrik.de/north-america/canada/british-columbia-latest-free.gpkg.zip",
-    "notes": "Streets, land use, water lines and help points, by tools/build_map.py, as for Southern California. Extract by Geofabrik."
+    "access": [
+     "https://download.geofabrik.de/north-america/canada/british-columbia/interior-admreg-latest-free.gpkg.zip",
+     "https://download.geofabrik.de/north-america/canada/british-columbia/island-admreg-latest-free.gpkg.zip",
+     "https://download.geofabrik.de/north-america/canada/british-columbia/kootenay-admreg-latest-free.gpkg.zip",
+     "https://download.geofabrik.de/north-america/canada/british-columbia/north-admreg-latest-free.gpkg.zip",
+     "https://download.geofabrik.de/north-america/canada/british-columbia/okanagan-admreg-latest-free.gpkg.zip",
+     "https://download.geofabrik.de/north-america/canada/british-columbia/southcoast-admreg-latest-free.gpkg.zip"
+    ],
+    "notes": "Streets, land use, water lines and help points from the six BC administrative region extracts published by Geofabrik."
    }
   ],
   "addresses": [

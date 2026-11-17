@@ -8,8 +8,8 @@
 Layers, in the order `all` runs them. Each writes one file with the same tables and columns as the US tool named, so the
 map, packaging/build_packs.py (region_set) and packaging/state_maps.py read it the same way:
 
-  roads      national.sqlite   tools/build_map.py on a Geofabrik OpenStreetMap extract (ODbL): streets, land, water
-                               lines and help points. --osm-gpkg takes a local copy of <extract>-latest-free.gpkg.zip.
+  roads      national.sqlite   tools/build_map.py on Geofabrik OpenStreetMap extracts (ODbL): streets, land, water
+                               lines and help points. Repeat --osm-gpkg for multiple local, unpacked GeoPackages.
   terrain    terrain.sqlite    tools/build_terrain.py on 1° cells cut from Natural Resources Canada's MRDEM-30 terrain
                                model (OGL – Canada; MRDEM is in part made from Copernicus WorldDEM-30, whose notice it
                                carries). Read through GDAL from NRCan's cloud-optimised files: only the box is fetched.
@@ -23,7 +23,8 @@ map, packaging/build_packs.py (region_set) and packaging/state_maps.py read it t
   buildings  buildings.sqlite  as tools/build_buildings.py, from Statistics Canada's Open Database of Buildings v3
                                (OGL – Canada; each municipal source and its licence is listed in the download's
                                ODB_v3_data_providers.csv). --ms fills zoom-14 cells ODB leaves empty with Microsoft's
-                               Canadian Building Footprints (ODbL). Only outlines and heights are kept. For OSM heights,
+                               Canadian Building Footprints (ODbL). Use --ms-only to skip ODB and build entirely from
+                               Microsoft footprints when ODB is unavailable. Only outlines and heights are kept. For OSM heights,
                                run tools/build_osm_heights.py with BUILDINGS_OUT set to this file afterwards.
   places     places.sqlite     as tools/build_places.py, from Natural Resources Canada's Canadian Geographical Names
                                (OGL – Canada) and named OpenStreetMap places in this region's national.sqlite.
@@ -36,6 +37,7 @@ Needs numpy, tifffile, rasterio (GDAL) and pyproj, as the build environment has 
 """
 import argparse, csv, io, json, math, os, re, shutil, sqlite3, subprocess, sys, tempfile, time, urllib.parse, urllib.request, zipfile, zlib
 from array import array
+from contextlib import closing
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
@@ -185,22 +187,30 @@ def finish(path):
 
 # --------------------------------------------------------------------------------------------------------------- roads --
 def build_roads(code, r, box, out, gpkg=None):
+    extracts = []
     if not gpkg:
-        url = r['sources']['roads'][0]['access']
-        z = download(url, CACHE / Path(urllib.parse.urlsplit(url).path).name)
-        gpkg = CACHE / (z.name.removesuffix('.zip').replace('-latest-free.gpkg', '') + '.gpkg')
-        if not gpkg.exists():
-            with zipfile.ZipFile(z) as zf:
-                member = next(m for m in zf.namelist() if m.endswith('.gpkg'))
-                with zf.open(member) as src, open(gpkg, 'wb') as dst:
-                    shutil.copyfileobj(src, dst, 1 << 22)
+        urls = r['sources']['roads'][0]['access']
+        for url in [urls] if isinstance(urls, str) else urls:
+            z = download(url, CACHE / Path(urllib.parse.urlsplit(url).path).name)
+            extract = CACHE / (z.name.removesuffix('.zip').replace('-latest-free.gpkg', '') + '.gpkg')
+            if not extract.exists():
+                tmp = extract.with_suffix('.part')
+                with zipfile.ZipFile(z) as zf:
+                    member = next(m for m in zf.namelist() if m.endswith('.gpkg'))
+                    with zf.open(member) as src, open(tmp, 'wb') as dst:
+                        shutil.copyfileobj(src, dst, 1 << 22)
+                tmp.replace(extract)
+            extracts.append(extract)
+    else:
+        extracts = gpkg
     dest = out / 'national.sqlite'
-    subprocess.run([sys.executable, str(HERE / 'tools/build_map.py'), str(gpkg), str(dest)], check=True)
+    subprocess.run([sys.executable, str(HERE / 'tools/build_map.py'), *map(str, extracts), str(dest)], check=True)
     db = sqlite3.connect(dest)
     # building outlines come from buildings.sqlite here, as in a state map; OSM's would draw twice
     db.execute("DELETE FROM feat_idx WHERE id IN (SELECT id FROM feat WHERE layer='bldg')")
     db.execute("DELETE FROM feat WHERE layer='bldg'")
-    db.executemany('INSERT OR REPLACE INTO meta VALUES (?,?)', [('source', f'OpenStreetMap contributors, via Geofabrik {Path(gpkg).name} (ODbL 1.0)'),
+    names = ', '.join(Path(extract).name for extract in extracts)
+    db.executemany('INSERT OR REPLACE INTO meta VALUES (?,?)', [('source', f'OpenStreetMap contributors, via Geofabrik {names} (ODbL 1.0)'),
                                                                 ('bounds', ','.join(f'{v:.2f}' for v in box)), ('data_as_of', ''),
                                                                 ('built', time.strftime('%Y-%m-%dT%H:%M:%S'))])
     db.commit()
@@ -533,22 +543,41 @@ def metres(v, floors=None):
         return 0
 
 
-def build_buildings(code, r, box, out, odb_files=None, ms=False):
-    from pyproj import Transformer
-    src = source(r, 'buildings', 'Open Database of Buildings')
-    files = [Path(f) for f in odb_files] if odb_files else [download(src['access'].format(file=f), CACHE / 'odb' / f) for f in src['files']]
+def build_buildings(code, r, box, out, odb_files=None, ms=False, ms_only=False):
+    if ms_only and odb_files:
+        raise ValueError('Microsoft-only builds cannot use ODB files')
+    files = [Path(f) for f in odb_files or []]
+    if not ms_only and not files:
+        src = source(r, 'buildings', 'Open Database of Buildings')
+        files = [download(src['access'].format(file=f), CACHE / 'odb' / f) for f in src['files']]
+    microsoft_zip = None
+    if ms or ms_only:
+        src = next(s for s in r['sources']['buildings'] if s['publisher'] == 'Microsoft')
+        url = src['access']
+        microsoft_zip = download(url, CACHE / 'msbuildings-ca' / Path(urllib.parse.urlsplit(url).path).name)
     dest = out / 'buildings.sqlite'
-    db = sqlite3.connect(dest)
-    db.executescript('PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; DROP TABLE IF EXISTS bldg; DROP TABLE IF EXISTS bldg_socal;'
+    with tempfile.TemporaryDirectory(dir=out) as tmp:
+        target = dest if dest.exists() else Path(tmp) / dest.name
+        with closing(sqlite3.connect(target)) as db, db:
+            write_buildings(db, box, files, microsoft_zip)
+        finish(target)
+        if target != dest:
+            target.replace(dest)
+
+
+def write_buildings(db, box, files, microsoft_zip):
+    db.executescript('PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; BEGIN; DROP TABLE IF EXISTS bldg; DROP TABLE IF EXISTS bldg_socal;'
                      'CREATE TABLE bldg(x INT, y INT, part INT, n INT, data BLOB, PRIMARY KEY(x,y,part)) WITHOUT ROWID;'
                      'CREATE TABLE bldg_socal(x INT, y INT, part INT, n INT, data BLOB, PRIMARY KEY(x,y,part)) WITHOUT ROWID;'
                      'CREATE TABLE IF NOT EXISTS bldg_osm(x INT, y INT, n INT, data BLOB, PRIMARY KEY(x,y)) WITHOUT ROWID;'
                      'CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);')
-    to_ll = Transformer.from_crs(3347, 4326, always_xy=True)
-    to_lcc = Transformer.from_crs(4326, 3347, always_xy=True)
-    edge = [(box[0] + (box[2] - box[0]) * i / 20, box[1] + (box[3] - box[1]) * j / 20) for i in range(21) for j in range(21)]
-    ex, ey = to_lcc.transform([p[0] for p in edge], [p[1] for p in edge])
-    env = (min(ex), max(ex), min(ey), max(ey))
+    if files:
+        from pyproj import Transformer
+        to_ll = Transformer.from_crs(3347, 4326, always_xy=True)
+        to_lcc = Transformer.from_crs(4326, 3347, always_xy=True)
+        edge = [(box[0] + (box[2] - box[0]) * i / 20, box[1] + (box[3] - box[1]) * j / 20) for i in range(21) for j in range(21)]
+        ex, ey = to_lcc.transform([p[0] for p in edge], [p[1] for p in edge])
+        env = (min(ex), max(ex), min(ey), max(ey))
     total, filled = 0, set()
     for part, f in enumerate(files):
         tiles, n = {}, 0
@@ -575,15 +604,13 @@ def build_buildings(code, r, box, out, odb_files=None, ms=False):
                         n += 1
             g.close()
         db.executemany('INSERT OR REPLACE INTO bldg VALUES (?,?,?,?,?)', ((x, y, part, c, zlib.compress(buf.tobytes(), 6)) for (x, y), (buf, c) in tiles.items()))
-        db.commit()
         filled |= set(tiles)
         total += n
         print(f'{f.name}: {n:,} buildings', flush=True)
-    if ms:
-        m = source(r, 'buildings', 'Microsoft')
-        z = download(m['access'], CACHE / 'msbuildings-ca' / Path(urllib.parse.urlsplit(m['access']).path).name)
+    sources = ['Statistics Canada Open Database of Buildings v3 (OGL - Canada)'] if total else []
+    if microsoft_zip:
         tiles, n = {}, 0
-        with zipfile.ZipFile(z) as zf, zf.open(next(x for x in zf.namelist() if x.endswith('json'))) as fh:
+        with zipfile.ZipFile(microsoft_zip) as zf, zf.open(next(x for x in zf.namelist() if x.endswith('json'))) as fh:
             for line in io.TextIOWrapper(fh, encoding='utf-8'):
                 line = line.strip().rstrip(',')
                 if not line.startswith('{') or '"Polygon"' not in line:
@@ -600,12 +627,11 @@ def build_buildings(code, r, box, out, odb_files=None, ms=False):
                     n += 1
         db.executemany('INSERT OR REPLACE INTO bldg VALUES (?,?,?,?,?)', ((x, y, 100, c, zlib.compress(buf.tobytes(), 6)) for (x, y), (buf, c) in tiles.items()))
         total += n
-        print(f'Microsoft fill-in: {n:,} buildings', flush=True)
+        if n:
+            sources.append('Microsoft Canadian Building Footprints (ODbL)')
+        print(f'Microsoft: {n:,} buildings', flush=True)
     db.executemany('INSERT OR REPLACE INTO meta VALUES (?,?)', [('buildings', str(total)), ('built', time.strftime('%Y-%m-%dT%H:%M:%S')),
-                    ('source', 'Statistics Canada Open Database of Buildings v3 (OGL - Canada)' + (' and Microsoft Canadian Building Footprints (ODbL)' if ms else ''))])
-    db.commit()
-    db.close()
-    finish(dest)
+                    ('source', ' and '.join(sources))])
 
 
 # -------------------------------------------------------------------------------------------------------------- places --
@@ -686,8 +712,10 @@ def main():
     ap.add_argument('--out', help='default derived/geo/regions/<code>')
     ap.add_argument('--workers', type=int, default=8)
     ap.add_argument('--year', type=int, default=2025, help='Annual Crop Inventory year')
-    ap.add_argument('--osm-gpkg', help='a local Geofabrik <extract>-free.gpkg instead of downloading it')
-    ap.add_argument('--odb', nargs='*', help='local ODB_v3_*.zip or .gpkg files instead of downloading them')
+    ap.add_argument('--osm-gpkg', action='append', help='a local, unpacked Geofabrik GeoPackage (repeat for multiple extracts)')
+    odb = ap.add_mutually_exclusive_group()
+    odb.add_argument('--odb', nargs='*', help='local ODB_v3_*.zip or .gpkg files instead of downloading them')
+    odb.add_argument('--ms-only', action='store_true', help='use only Microsoft Canadian Building Footprints, skipping Statistics Canada')
     ap.add_argument('--ms', action='store_true', help='fill cells ODB leaves empty with Microsoft Canadian Building Footprints')
     ap.add_argument('--all-streams', action='store_true', help='every stream, not only named ones (much larger)')
     a = ap.parse_args()
@@ -709,7 +737,7 @@ def main():
         elif layer == 'crops':
             build_crops(a.code, r, box, out, a.year)
         elif layer == 'buildings':
-            build_buildings(a.code, r, box, out, a.odb, a.ms)
+            build_buildings(a.code, r, box, out, a.odb, a.ms, a.ms_only)
         elif layer == 'places':
             build_places(a.code, r, box, out)
         print(f'== {layer} done in {time.time() - t0:.0f}s', flush=True)

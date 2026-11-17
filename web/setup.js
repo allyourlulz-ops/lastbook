@@ -95,7 +95,7 @@
   /* a map outside the US (a province, a country) is listed with the states; the words then say "state or region" where they said "state" */
   const isState = m => !m || (m.kind || 'state') === 'state';
   const placeWord = () => maps().every(isState) ? 'state' : 'state or region';
-  const inUs = m => isState(m);       // All carries every US state map, and no map outside the US
+  const hasMap = (m, now) => !!m && (m.id === now || (now === 'us' && isState(m)));
   /* the detailed map the library will have once the chosen pack is in: the person's state map, or the one the pack carries */
   const PACK_MAP = { medium: 'CA', all: 'us' };   // what the packs carry today; a manifest packs[].map, when there, wins
   const packMap = id => { const p = packById(id) || {}; return 'map' in p ? p.map || null : PACK_MAP[id] || null };
@@ -105,7 +105,10 @@
   const addressById = id => addresses().find(a => a.id === id);
   const addressAdds = () => { const a = addressById(selectedState()); return a && a.available !== false && !((cur() || {}).address_indexes || []).includes(a.id) ? a : null };
   const mapMissing = () => !selectedState();
-  const mapAdds = () => choice.map && choice.map !== mapNow() && mapNow() !== 'us' ? mapById(choice.map) : null;
+  const mapAdds = () => {
+    const m = mapById(choice.map);
+    return m && !hasMap(m, mapNow()) ? m : null;
+  };
   function packSummary(p) {
     const text = p.summary || '';
     if (p.id !== 'medium' || !maps().length) return text;
@@ -263,7 +266,7 @@
     main.querySelectorAll('[data-pack-summary]').forEach(el => { el.textContent = packSummary(packById(el.dataset.packSummary)) });
     const selected = selectedState();
     const opts = maps().map(m => {
-      const a = addressById(m.id), included = (now === 'us' && inUs(m)) || m.id === now;
+      const a = addressById(m.id), included = hasMap(m, now);
       const addressIncluded = ((cur() || {}).address_indexes || []).includes(m.id);
       const off = !included && m.available === false;
       const bytes = (included ? 0 : packDl(m)) + (a && a.available !== false && !addressIncluded ? packDl(a) : 0);
@@ -271,7 +274,7 @@
       return `<option value="${esc(m.id)}"${selected === m.id ? ' selected' : ''}${off ? ' disabled' : ''}>${esc(m.title)} — ${details}</option>`;
     }).join('');
     const sel = mapById(selected), a = addressAdds();
-    const mapIncluded = (now === 'us' && inUs(sel)) || selected === now;
+    const mapIncluded = hasMap(sel, now);
     const bytes = (sel && !mapIncluded ? packDl(sel) : 0) + (a ? packDl(a) : 0);
     const disk = (sel && !mapIncluded ? sel.installed_bytes || 0 : 0) + (a ? a.installed_bytes || 0 : 0);
     const unavailable = selected && addresses().length && (!addressById(selected) || addressById(selected).available === false);

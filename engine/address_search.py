@@ -38,6 +38,8 @@ PROVINCE_CODES = set(PROVINCES.values())
 POSTCODE_FIRST = {'A': 'NL', 'B': 'NS', 'C': 'PE', 'E': 'NB', 'G': 'QC', 'H': 'QC', 'J': 'QC', 'K': 'ON', 'L': 'ON', 'M': 'ON',
                   'N': 'ON', 'P': 'ON', 'R': 'MB', 'S': 'SK', 'T': 'AB', 'V': 'BC', 'Y': 'YT'}     # Canada Post; X is two territories
 CA_POSTCODE = re.compile(r'[\s,]*\b([ABCEGHJ-NPRSTVXY]\d[ABCEGHJ-NPRSTV-Z])\s?(\d[ABCEGHJ-NPRSTV-Z]\d)\s*$', re.I)
+DIRECTIONS = {'n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'}
+STREET_TYPES = {'blvd', 'ave', 'st', 'dr', 'rd', 'pl', 'ct', 'ln', 'ter', 'cir', 'hwy', 'pkwy', 'sq'}
 ONES = 'zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty'.split()
 ORDINALS = 'zeroth first second third fourth fifth sixth seventh eighth ninth tenth eleventh twelfth thirteenth fourteenth fifteenth sixteenth seventeenth eighteenth nineteenth twentieth'.split()
 TO_DIGITS = {word: str(number) for number, word in enumerate(ONES)}
@@ -56,12 +58,17 @@ def is_address_query(query):
     return bool(re.match(r'^\s*\d[\w-]*\s+\S', query))
 
 
-def street_forms(street):
+def street_forms(street, canadian=False):
     words = street.split()
     forms = [street, ' '.join(TO_DIGITS.get(word, word) for word in words),
              ' '.join(TO_WORDS.get(word, word) for word in words)]
     forms += [re.sub(r'\b(\d+)(st|nd|rd|th)\b', r'\1', form) for form in forms[:]]
-    if words[0] not in ('n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'):
+    suffix_direction = canadian and len(words) >= 3 and words[-2] in STREET_TYPES and words[-1] in DIRECTIONS
+    if canadian and len(words) >= 3 and words[0] in DIRECTIONS and words[-1] in STREET_TYPES:
+        forms += [' '.join([*parts[1:], parts[0]]) for parts in map(str.split, forms[:])]
+    elif suffix_direction:
+        forms += [' '.join([parts[-1], *parts[:-1]]) for parts in map(str.split, forms[:])]
+    if words[0] not in DIRECTIONS and not suffix_direction:
         forms += [f'{direction} {form}' for form in forms[:] for direction in ('n', 's', 'e', 'w')]
     return list(dict.fromkeys(forms))
 
@@ -135,7 +142,7 @@ def find_addresses(query, geo_directory, limit=8, near=None):
     try:
         for path in paths:
             try:
-                connections.append(sqlite3.connect(ro_uri(path), uri=True))
+                connections.append((sqlite3.connect(ro_uri(path), uri=True), path.stem.upper().startswith('CA-')))
             except sqlite3.Error:
                 continue
         for count in range(len(words), 0, -1):
@@ -144,21 +151,22 @@ def find_addresses(query, geo_directory, limit=8, near=None):
                 continue
             city = ' '.join(words[count:])
             rows = []
-            for form in street_forms(street):
-                conditions = ['num IN (?, ?)', 'norm >= ?', 'norm < ?']
-                parameters = [number, number.lower(), form, form + '\uffff']
-                if state:
-                    conditions.append('state = ?')
-                    parameters.append(state)
-                if postcode:
-                    conditions.append('zip = ?')
-                    parameters.append(postcode)
-                if city:
-                    conditions.append('lower(city) LIKE ?')
-                    parameters.append(city + '%')
-                sql = ('SELECT num,street,city,state,zip,lat,lon,norm FROM addr WHERE '
-                       + ' AND '.join(conditions) + ' ORDER BY length(norm),norm LIMIT ?')
-                for connection in connections:
+            forms = {canadian: street_forms(street, canadian) for canadian in (False, True)}
+            for connection, canadian in connections:
+                for form in forms[canadian]:
+                    conditions = ['num IN (?, ?)', 'norm >= ?', 'norm < ?']
+                    parameters = [number, number.lower(), form, form + '\uffff']
+                    if state:
+                        conditions.append('state = ?')
+                        parameters.append(state)
+                    if postcode:
+                        conditions.append('zip = ?')
+                        parameters.append(postcode)
+                    if city:
+                        conditions.append('lower(city) LIKE ?')
+                        parameters.append(city + '%')
+                    sql = ('SELECT num,street,city,state,zip,lat,lon,norm FROM addr WHERE '
+                           + ' AND '.join(conditions) + ' ORDER BY length(norm),norm LIMIT ?')
                     try:
                         rows.extend(connection.execute(sql, [*parameters, limit * 3]).fetchall())
                     except sqlite3.Error:
@@ -185,5 +193,5 @@ def find_addresses(query, geo_directory, limit=8, near=None):
                 return results
         return []
     finally:
-        for connection in connections:
+        for connection, _ in connections:
             connection.close()

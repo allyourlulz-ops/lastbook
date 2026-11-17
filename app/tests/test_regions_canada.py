@@ -9,9 +9,12 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import zipfile
 import zlib
 from array import array
+from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 from engine import address_search
 from engine.address_search import find_addresses, normalize
@@ -117,7 +120,10 @@ class CanadianAddresses(unittest.TestCase):
         (self.geo / 'addresses').mkdir()
         self.write('CA-ON', [('100', 'Queen Street West', 'Toronto', 'CA-ON', 'M5H 2N2', 43.6525, -79.3832),
                              ('100', 'Queen Street', 'Ottawa', 'CA-ON', 'K1P 1J9', 45.4215, -75.6972)])
-        self.write('CA-BC', [('1000', 'Douglas Street', 'Victoria', 'CA-BC', 'V8W 2C3', 48.4262, -123.3656)])
+        self.write('CA-BC', [('1000', 'Douglas Street', 'Victoria', 'CA-BC', 'V8W 2C3', 48.4262, -123.3656),
+                             ('453', '12th Ave W', 'Vancouver', 'CA-BC', 'V5Y 1V4', 49.261, -123.113),
+                             ('453', '12th Ave E', 'Vancouver', 'CA-BC', 'V5T 0B5', 49.260, -123.095),
+                             ('123', 'East First Avenue', 'Vancouver', 'CA-BC', 'V5T 1A1', 49.269, -123.103)])
         self.write('CA', [('100', 'Euclid Avenue', 'Ontario', 'CA', '91762', 34.06, -117.65),
                           ('18001', 'Nine Mile Road', 'Example', 'CA', '90001', 34.0, -118.0)])
         self.write('MI', [('18001', 'W Nine Mile Road', 'Novi', 'MI', '48375', 42.45, -83.47)])
@@ -153,6 +159,13 @@ class CanadianAddresses(unittest.TestCase):
     def test_province_parts(self):
         self.assertEqual(address_search._parts('100 Queen St W, Toronto, ON M5H 2N2'), ('100', ['queen', 'st', 'w', 'toronto'], 'CA-ON', 'M5H 2N2'))
         self.assertEqual(address_search._parts('1000 Douglas St V8W 2C3')[2:], ('CA-BC', 'V8W 2C3'))
+
+    def test_canadian_street_directions_can_go_before_or_after_the_street(self):
+        for query in ('453 W 12th Avenue', '453 12th Ave W,', '453 West 12th Avenue, Vancouver, BC V5Y 1V4'):
+            with self.subTest(query=query):
+                self.assertEqual([r['detail'] for r in find_addresses(query, self.geo)], ['Vancouver, BC, V5Y 1V4'])
+        self.assertEqual([r['name'] for r in find_addresses('123 1st Ave E, Vancouver, BC', self.geo)], ['123 East First Avenue'])
+        self.assertEqual(find_addresses('453 W 12th Avenue, Vancouver, BC V5T 0B5', self.geo), [])
 
     def test_us_behaviour_is_unchanged(self):
         self.assertEqual(address_search._parts('18001 W Nine Mile Road, Novi, MI 48375'), ('18001', ['w', 'nine', 'mile', 'rd', 'novi'], 'MI', '48375'))
@@ -226,6 +239,46 @@ class BuilderPieces(unittest.TestCase):
         poly = {'type': 'MultiPolygon', 'coordinates': [[[[0, 0, 5], [1, 0, 5], [1, 1, 5], [0, 0, 5]]]]}
         self.assertEqual(self.tool.rings_of(poly), [[[(0, 0), (1, 0), (1, 1), (0, 0)]]])
         self.assertEqual(tuple(self.tool.point_of({'type': 'LineString', 'coordinates': [[0, 0], [1, 1], [2, 2]]})), (1, 1))
+
+    def test_microsoft_only_build_skips_statcan_and_credits_the_footprints(self):
+        sources = regions.get('CA-BC')['sources']['buildings']
+        microsoft = next(s for s in sources if s['publisher'] == 'Microsoft')
+        ring = [[-123.11, 49.26], [-123.1099, 49.26], [-123.11, 49.2601], [-123.11, 49.26]]
+        feature = {'type': 'Feature', 'geometry': {'type': 'Polygon', 'coordinates': [ring]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            archive = out / 'BritishColumbia.zip'
+            with zipfile.ZipFile(archive, 'w') as z:
+                z.writestr('BritishColumbia.geojson', json.dumps(feature) + '\n')
+            args = ['builder', 'CA-BC', 'buildings', '--ms-only', '--out', tmp]
+            with patch.object(sys, 'argv', args), patch.object(self.tool, 'CACHE', out), \
+                    patch.object(self.tool, 'download', return_value=archive) as download:
+                self.tool.main()
+                download.assert_called_once_with(microsoft['access'], out / 'msbuildings-ca' / archive.name)
+            with closing(sqlite3.connect(out / 'buildings.sqlite')) as db:
+                meta = dict(db.execute('SELECT key,value FROM meta'))
+                self.assertEqual(meta['buildings'], '1')
+                self.assertEqual(meta['source'], 'Microsoft Canadian Building Footprints (ODbL)')
+                self.assertEqual(db.execute('SELECT n FROM bldg').fetchall(), [(1,)])
+
+    def test_bad_microsoft_archive_preserves_the_last_build(self):
+        region = regions.get('CA-BC')
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            archive = out / 'bad.zip'
+            archive.write_bytes(b'incomplete')
+            dest = out / 'buildings.sqlite'
+            with patch.object(self.tool, 'download', return_value=archive):
+                with self.assertRaises(zipfile.BadZipFile):
+                    self.tool.build_buildings('CA-BC', region, regions.box('CA-BC'), out, ms_only=True)
+                self.assertFalse(dest.exists())
+                with closing(sqlite3.connect(dest)) as db, db:
+                    db.execute('CREATE TABLE bldg(n INT)')
+                    db.execute('INSERT INTO bldg VALUES (9)')
+                with self.assertRaises(zipfile.BadZipFile):
+                    self.tool.build_buildings('CA-BC', region, regions.box('CA-BC'), out, ms_only=True)
+                with closing(sqlite3.connect(dest)) as db:
+                    self.assertEqual(db.execute('SELECT n FROM bldg').fetchall(), [(9,)])
 
 
 if __name__ == '__main__':
