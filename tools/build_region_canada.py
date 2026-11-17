@@ -8,8 +8,8 @@
 Layers, in the order `all` runs them. Each writes one file with the same tables and columns as the US tool named, so the
 map, packaging/build_packs.py (region_set) and packaging/state_maps.py read it the same way:
 
-  roads      national.sqlite   tools/build_map.py on a Geofabrik OpenStreetMap extract (ODbL): streets, land, water
-                               lines and help points. --osm-gpkg takes a local copy of <extract>-latest-free.gpkg.zip.
+  roads      national.sqlite   tools/build_map.py on Geofabrik OpenStreetMap extracts (ODbL): streets, land, water
+                               lines and help points. Repeat --osm-gpkg for multiple local, unpacked GeoPackages.
   terrain    terrain.sqlite    tools/build_terrain.py on 1° cells cut from Natural Resources Canada's MRDEM-30 terrain
                                model (OGL – Canada; MRDEM is in part made from Copernicus WorldDEM-30, whose notice it
                                carries). Read through GDAL from NRCan's cloud-optimised files: only the box is fetched.
@@ -185,22 +185,30 @@ def finish(path):
 
 # --------------------------------------------------------------------------------------------------------------- roads --
 def build_roads(code, r, box, out, gpkg=None):
+    extracts = []
     if not gpkg:
-        url = r['sources']['roads'][0]['access']
-        z = download(url, CACHE / Path(urllib.parse.urlsplit(url).path).name)
-        gpkg = CACHE / (z.name.removesuffix('.zip').replace('-latest-free.gpkg', '') + '.gpkg')
-        if not gpkg.exists():
-            with zipfile.ZipFile(z) as zf:
-                member = next(m for m in zf.namelist() if m.endswith('.gpkg'))
-                with zf.open(member) as src, open(gpkg, 'wb') as dst:
-                    shutil.copyfileobj(src, dst, 1 << 22)
+        urls = r['sources']['roads'][0]['access']
+        for url in [urls] if isinstance(urls, str) else urls:
+            z = download(url, CACHE / Path(urllib.parse.urlsplit(url).path).name)
+            extract = CACHE / (z.name.removesuffix('.zip').replace('-latest-free.gpkg', '') + '.gpkg')
+            if not extract.exists():
+                tmp = extract.with_suffix('.part')
+                with zipfile.ZipFile(z) as zf:
+                    member = next(m for m in zf.namelist() if m.endswith('.gpkg'))
+                    with zf.open(member) as src, open(tmp, 'wb') as dst:
+                        shutil.copyfileobj(src, dst, 1 << 22)
+                tmp.replace(extract)
+            extracts.append(extract)
+    else:
+        extracts = gpkg
     dest = out / 'national.sqlite'
-    subprocess.run([sys.executable, str(HERE / 'tools/build_map.py'), str(gpkg), str(dest)], check=True)
+    subprocess.run([sys.executable, str(HERE / 'tools/build_map.py'), *map(str, extracts), str(dest)], check=True)
     db = sqlite3.connect(dest)
     # building outlines come from buildings.sqlite here, as in a state map; OSM's would draw twice
     db.execute("DELETE FROM feat_idx WHERE id IN (SELECT id FROM feat WHERE layer='bldg')")
     db.execute("DELETE FROM feat WHERE layer='bldg'")
-    db.executemany('INSERT OR REPLACE INTO meta VALUES (?,?)', [('source', f'OpenStreetMap contributors, via Geofabrik {Path(gpkg).name} (ODbL 1.0)'),
+    names = ', '.join(Path(extract).name for extract in extracts)
+    db.executemany('INSERT OR REPLACE INTO meta VALUES (?,?)', [('source', f'OpenStreetMap contributors, via Geofabrik {names} (ODbL 1.0)'),
                                                                 ('bounds', ','.join(f'{v:.2f}' for v in box)), ('data_as_of', ''),
                                                                 ('built', time.strftime('%Y-%m-%dT%H:%M:%S'))])
     db.commit()
@@ -686,7 +694,7 @@ def main():
     ap.add_argument('--out', help='default derived/geo/regions/<code>')
     ap.add_argument('--workers', type=int, default=8)
     ap.add_argument('--year', type=int, default=2025, help='Annual Crop Inventory year')
-    ap.add_argument('--osm-gpkg', help='a local Geofabrik <extract>-free.gpkg instead of downloading it')
+    ap.add_argument('--osm-gpkg', action='append', help='a local, unpacked Geofabrik GeoPackage (repeat for multiple extracts)')
     ap.add_argument('--odb', nargs='*', help='local ODB_v3_*.zip or .gpkg files instead of downloading them')
     ap.add_argument('--ms', action='store_true', help='fill cells ODB leaves empty with Microsoft Canadian Building Footprints')
     ap.add_argument('--all-streams', action='store_true', help='every stream, not only named ones (much larger)')

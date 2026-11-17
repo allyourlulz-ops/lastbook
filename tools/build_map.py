@@ -3,6 +3,7 @@
 map database the app can draw offline.
 
   python3 tools/build_map.py derived/geo/socal.gpkg derived/geo/map.sqlite
+  python3 tools/build_map.py region-1.gpkg region-2.gpkg derived/geo/map.sqlite
 
 Input is a copy extracted from library-data/geography/openstreetmap/socal-latest-free.gpkg.zip;
 the original archive is only read. Output tables:
@@ -13,8 +14,9 @@ the original archive is only read. Output tables:
 """
 import math, sqlite3, struct, sys, time
 from array import array
+from pathlib import Path
 
-SRC, DST = sys.argv[1], sys.argv[2]
+SOURCES, DST = sys.argv[1:-1], sys.argv[-1]
 Q = 1e6
 
 ROAD_Z = {'motorway': 5, 'trunk': 6, 'motorway_link': 10, 'trunk_link': 10, 'primary': 8, 'primary_link': 12,
@@ -121,7 +123,15 @@ def area_z(minx, maxx, miny, maxy, base):
 
 def main():
     t0 = time.time()
-    src = sqlite3.connect(SRC)
+    if not SOURCES:
+        raise SystemExit('usage: build_map.py SOURCE.gpkg [SOURCE.gpkg ...] DEST.sqlite')
+    src = sqlite3.connect(':memory:', uri=True)
+    src.execute('PRAGMA temp_store=FILE')
+    schemas = []
+    for index, path in enumerate(SOURCES):
+        schema = f'extract{index}'
+        src.execute(f'ATTACH DATABASE ? AS {schema}', (Path(path).resolve().as_uri() + '?mode=ro',))
+        schemas.append(schema)
     dst = sqlite3.connect(DST)
     dst.executescript('''PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;
       DROP TABLE IF EXISTS feat; DROP TABLE IF EXISTS feat_idx; DROP TABLE IF EXISTS poi; DROP TABLE IF EXISTS meta;
@@ -140,7 +150,8 @@ def main():
         dst.execute('INSERT INTO feat_idx VALUES (?,?,?,?,?,?,?)', (fid[0], *bx, minz, 30))
 
     def each(table, cols='fclass,name'):
-        for row in src.execute(f'SELECT geom,{cols} FROM {table}'):
+        query = ' UNION '.join(f'SELECT geom,{cols} FROM {schema}.{table}' for schema in schemas)
+        for row in src.execute(query):
             if row[0] is None:
                 continue
             try:
@@ -202,6 +213,8 @@ def main():
         ('built', time.strftime('%Y-%m-%dT%H:%M:%S')),
     ])
     dst.commit()
+    src.close()
+    dst.close()
     print('done features', fid[0], 'pois', pid, round(time.time() - t0), 's', flush=True)
 
 
