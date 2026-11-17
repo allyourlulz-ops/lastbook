@@ -34,7 +34,7 @@ if __name__ == '__main__':  # --data must be known before the paths below are wo
 import engine.paths as lastbook_paths  # noqa: E402  (data folder and program folder can differ in the packaged app)
 from engine.paths import ro_uri  # noqa: E402
 from engine import saved_pages, address_search  # noqa: E402
-from engine.setup import api as setup_api  # noqa: E402  (the one module that may download: only when the person asks)
+from engine.setup import api as setup_api, install as setup_install  # noqa: E402
 HERE = lastbook_paths.DATA  # holds derived/
 APP = lastbook_paths.APP  # holds web/ and content/
 LIB = lastbook_paths.LIB
@@ -1616,7 +1616,11 @@ def map_info():
         geo.append({'label': 'Aerial photos, whole US (USGS The National Map: USDA NAIP and other orthoimagery)', 'status': 'Zoom 0-15 nationwide, 16 in California and towns · downloading'})
     pack = pack_info()
     extra = {'aerial': has_aerial()}
-    if pack:
+    bc = setup_install.map_name(HERE) == 'CA-BC'
+    if bc:
+        extra.update(map_contents())
+        geo, extra['attribution'] = bc_map_datasets()
+    elif pack:
         extra.update(map_contents())
         geo = pack_datasets(extra)
     return {**extra, 'meta': meta, 'datasets': geo, 'national': {k: v for k, v in national_status().items() if k not in ('source', 'database')}, 'version': data_version(), 'aerial_detail': detail, 'aerial_rev': rev, 'terrain_circle': tdetail}
@@ -1639,6 +1643,38 @@ def pack_datasets(have):
     if CROPDB.exists():
         out.append({'label': 'Orchards, vineyards and berry fields (USDA Cropland Data Layer)', 'status': f'For {area}'})
     return out
+
+
+def bc_map_datasets():
+    attribution = ['© OpenStreetMap contributors', 'Natural Resources Canada', 'Government of British Columbia',
+                   'Agriculture and Agri-Food Canada']
+    canada = 'Contains information licensed under the Open Government Licence – Canada.'
+    bc = 'Contains information licensed under the Open Government Licence – British Columbia.'
+    out = [
+        {'label': 'British Columbia streets and help points (OpenStreetMap)', 'status': 'Via Geofabrik, under the Open Database License (ODbL).'},
+        {'label': 'US base map (OpenStreetMap, USGS and Natural Earth)', 'status': 'Overview outside the detailed British Columbia map.'},
+    ]
+    if PLACEDB.exists():
+        out.append({'label': 'Canadian Geographical Names (Natural Resources Canada)', 'status': canada})
+    if WATERDB.exists():
+        out.append({'label': 'Freshwater Atlas and BC Dams (Government of British Columbia)', 'status': bc})
+    if TERRAINDB.exists():
+        out.append({'label': 'Elevation (Natural Resources Canada MRDEM, 30 m)', 'status': canada +
+                    ' Produced in part using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved. The organisations in charge of the Copernicus programme by law or by delegation do not incur any liability for any use of the Copernicus WorldDEM-30.'})
+    if BLDGDB.exists():
+        sources = ' '.join(_distinct(BLDGDB, "SELECT value FROM meta WHERE key='source'"))
+        if 'Open Database of Buildings' in sources:
+            attribution.append('Statistics Canada')
+            out.append({'label': 'Building outlines (Statistics Canada Open Database of Buildings v3)',
+                        'status': 'Adapted from Statistics Canada, The Open Database of Buildings, version 3. This does not constitute an endorsement by Statistics Canada of this product.'})
+        if 'Microsoft' in sources:
+            attribution.append('Microsoft')
+            out.append({'label': 'Microsoft Canadian Building Footprints', 'status': 'Under the Open Database License (ODbL).'})
+    if CROPDB.exists():
+        out.append({'label': 'Annual Crop Inventory (Agriculture and Agri-Food Canada)', 'status': canada})
+    if (HERE / 'derived/geo/addresses/CA-BC.sqlite').is_file():
+        out.append({'label': 'Street addresses (Overture Maps)', 'status': 'Adapted from Statistics Canada, National Address Register. This does not constitute an endorsement by Statistics Canada of this product.'})
+    return out, ' · '.join(attribution)
 
 
 # --------------------------------------------------------------- handler ----

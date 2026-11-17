@@ -117,7 +117,10 @@ class CanadianAddresses(unittest.TestCase):
         (self.geo / 'addresses').mkdir()
         self.write('CA-ON', [('100', 'Queen Street West', 'Toronto', 'CA-ON', 'M5H 2N2', 43.6525, -79.3832),
                              ('100', 'Queen Street', 'Ottawa', 'CA-ON', 'K1P 1J9', 45.4215, -75.6972)])
-        self.write('CA-BC', [('1000', 'Douglas Street', 'Victoria', 'CA-BC', 'V8W 2C3', 48.4262, -123.3656)])
+        self.write('CA-BC', [('1000', 'Douglas Street', 'Victoria', 'CA-BC', 'V8W 2C3', 48.4262, -123.3656),
+                             ('453', '12th Ave W', 'Vancouver', 'CA-BC', 'V5Y 1V4', 49.261, -123.113),
+                             ('453', '12th Ave E', 'Vancouver', 'CA-BC', 'V5T 0B5', 49.260, -123.095),
+                             ('123', 'East First Avenue', 'Vancouver', 'CA-BC', 'V5T 1A1', 49.269, -123.103)])
         self.write('CA', [('100', 'Euclid Avenue', 'Ontario', 'CA', '91762', 34.06, -117.65),
                           ('18001', 'Nine Mile Road', 'Example', 'CA', '90001', 34.0, -118.0)])
         self.write('MI', [('18001', 'W Nine Mile Road', 'Novi', 'MI', '48375', 42.45, -83.47)])
@@ -153,6 +156,13 @@ class CanadianAddresses(unittest.TestCase):
     def test_province_parts(self):
         self.assertEqual(address_search._parts('100 Queen St W, Toronto, ON M5H 2N2'), ('100', ['queen', 'st', 'w', 'toronto'], 'CA-ON', 'M5H 2N2'))
         self.assertEqual(address_search._parts('1000 Douglas St V8W 2C3')[2:], ('CA-BC', 'V8W 2C3'))
+
+    def test_canadian_street_directions_can_go_before_or_after_the_street(self):
+        for query in ('453 W 12th Avenue', '453 12th Ave W,', '453 West 12th Avenue, Vancouver, BC V5Y 1V4'):
+            with self.subTest(query=query):
+                self.assertEqual([r['detail'] for r in find_addresses(query, self.geo)], ['Vancouver, BC, V5Y 1V4'])
+        self.assertEqual([r['name'] for r in find_addresses('123 1st Ave E, Vancouver, BC', self.geo)], ['123 East First Avenue'])
+        self.assertEqual(find_addresses('453 W 12th Avenue, Vancouver, BC V5T 0B5', self.geo), [])
 
     def test_us_behaviour_is_unchanged(self):
         self.assertEqual(address_search._parts('18001 W Nine Mile Road, Novi, MI 48375'), ('18001', ['w', 'nine', 'mile', 'rd', 'novi'], 'MI', '48375'))
