@@ -9,9 +9,12 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import zipfile
 import zlib
 from array import array
+from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 from engine import address_search
 from engine.address_search import find_addresses, normalize
@@ -236,6 +239,46 @@ class BuilderPieces(unittest.TestCase):
         poly = {'type': 'MultiPolygon', 'coordinates': [[[[0, 0, 5], [1, 0, 5], [1, 1, 5], [0, 0, 5]]]]}
         self.assertEqual(self.tool.rings_of(poly), [[[(0, 0), (1, 0), (1, 1), (0, 0)]]])
         self.assertEqual(tuple(self.tool.point_of({'type': 'LineString', 'coordinates': [[0, 0], [1, 1], [2, 2]]})), (1, 1))
+
+    def test_microsoft_only_build_skips_statcan_and_credits_the_footprints(self):
+        sources = regions.get('CA-BC')['sources']['buildings']
+        microsoft = next(s for s in sources if s['publisher'] == 'Microsoft')
+        ring = [[-123.11, 49.26], [-123.1099, 49.26], [-123.11, 49.2601], [-123.11, 49.26]]
+        feature = {'type': 'Feature', 'geometry': {'type': 'Polygon', 'coordinates': [ring]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            archive = out / 'BritishColumbia.zip'
+            with zipfile.ZipFile(archive, 'w') as z:
+                z.writestr('BritishColumbia.geojson', json.dumps(feature) + '\n')
+            args = ['builder', 'CA-BC', 'buildings', '--ms-only', '--out', tmp]
+            with patch.object(sys, 'argv', args), patch.object(self.tool, 'CACHE', out), \
+                    patch.object(self.tool, 'download', return_value=archive) as download:
+                self.tool.main()
+                download.assert_called_once_with(microsoft['access'], out / 'msbuildings-ca' / archive.name)
+            with closing(sqlite3.connect(out / 'buildings.sqlite')) as db:
+                meta = dict(db.execute('SELECT key,value FROM meta'))
+                self.assertEqual(meta['buildings'], '1')
+                self.assertEqual(meta['source'], 'Microsoft Canadian Building Footprints (ODbL)')
+                self.assertEqual(db.execute('SELECT n FROM bldg').fetchall(), [(1,)])
+
+    def test_bad_microsoft_archive_preserves_the_last_build(self):
+        region = regions.get('CA-BC')
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            archive = out / 'bad.zip'
+            archive.write_bytes(b'incomplete')
+            dest = out / 'buildings.sqlite'
+            with patch.object(self.tool, 'download', return_value=archive):
+                with self.assertRaises(zipfile.BadZipFile):
+                    self.tool.build_buildings('CA-BC', region, regions.box('CA-BC'), out, ms_only=True)
+                self.assertFalse(dest.exists())
+                with closing(sqlite3.connect(dest)) as db, db:
+                    db.execute('CREATE TABLE bldg(n INT)')
+                    db.execute('INSERT INTO bldg VALUES (9)')
+                with self.assertRaises(zipfile.BadZipFile):
+                    self.tool.build_buildings('CA-BC', region, regions.box('CA-BC'), out, ms_only=True)
+                with closing(sqlite3.connect(dest)) as db:
+                    self.assertEqual(db.execute('SELECT n FROM bldg').fetchall(), [(9,)])
 
 
 if __name__ == '__main__':
